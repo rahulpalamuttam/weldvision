@@ -1,0 +1,6 @@
+LDFLAGS=-L/Users/rpalamut/Projects/weld/target/debug/ pkg-config
+
+all:
+	g++ *.cpp -o exec ${LDFLAGS} -lpng -lweld
+clean:
+	rm -rf t

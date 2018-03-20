@@ -1,0 +1,486 @@
+
+/*
+ * Copyright 2002-2010 Guillaume Cottenceau.
+ *
+ * This software may be freely redistributed under the terms
+ * of the X11 license.
+ *
+ */
+
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdarg.h>
+
+#define PNG_DEBUG 3
+#include <png.h>
+#include "../../../rpalamut/Projects/weld/c/weld.h"
+#include <opencv2/opencv.hpp>
+void abort_(const char * s, ...)
+{
+        va_list args;
+        va_start(args, s);
+        vfprintf(stderr, s, args);
+        fprintf(stderr, "\n");
+        va_end(args);
+        abort();
+}
+
+int x, y;
+
+int width, height;
+png_byte color_type;
+png_byte bit_depth;
+
+png_structp png_ptr;
+png_infop info_ptr;
+int number_of_passes;
+png_bytep * row_pointers;
+
+template<class T>
+struct weld_vector {
+  T *data;
+  int64_t length;
+};
+  
+  struct args {
+    struct weld_vector<int32_t> vector;
+  };
+
+int32_t* weld_prog1(int32_t* d, int H, int W, int C) {
+  const char *program = "|x:vec[i32]| result(for(rangeiter(1L, 512L * 512L, 1L), \
+                           appender[i32], \
+                           |b,i,e| merge(b, \ 
+                              i32(f32(lookup(x, e))*0.299f + \ 
+                                  f32(lookup(x, e + (512L * 512L)))*0.587f + \
+                                  f32(lookup(x, e + 2L*(512L * 512L)))*0.114f) \
+                               ) \
+                         ))";
+
+  weld_error_t e = weld_error_new();
+    weld_conf_t conf = weld_conf_new();
+    weld_module_t m = weld_module_compile(program, conf, e);
+    weld_conf_free(conf);
+
+    if (weld_error_code(e)) {
+        const char *err = weld_error_message(e);
+        printf("Error message: %s\n", err);
+        exit(1);
+    }
+
+    weld_vector<int32_t> v;
+    const uint64_t length = H * W * C;
+    int32_t *data = d;
+
+    v.data = data;
+    v.length = length;
+
+    struct args a;
+    a.vector = v;
+
+    weld_value_t arg = weld_value_new(&a);
+
+    // Run the module and get the result.
+    conf = weld_conf_new();
+    weld_value_t result = weld_module_run(m, conf, arg, e);
+    if (weld_error_code(e)) {
+        const char *err = weld_error_message(e);
+        printf("Error message: %s\n", err);
+        exit(1);
+    }
+    weld_vector<int32_t> *result_data = (weld_vector<int32_t> *) weld_value_data(result);
+    printf("Answer: %llu\n", result_data->length);
+    printf("Expect: %llu\n", length);
+
+    //    free(data);
+
+    // Free the values.
+    //weld_value_free(result);
+    weld_value_free(arg);
+    weld_conf_free(conf);
+
+    weld_error_free(e);
+    weld_module_free(m);
+
+    
+    return result_data->data;
+}
+
+int32_t* weld_prog(int32_t* d, int H, int W, int C) {
+  const char *program = "|x:vec[i32],w:vec[f32]| \
+result(for(x,					 \
+appender[i32],					 \
+|b, i, e|					 \
+merge(b, result(				 \
+  for(						 \
+    rangeiter(0L, 3L, 1L),			 \
+    merger[i32, +],				 \
+    |b, ii, e|					 \
+    merge(b, result(				 \
+      for(					 \
+        rangeiter(0L, 3L, 1L),			 \
+        merger[i32, +],				 \
+        |b, jj, e|				 \
+        (let j = (i / 512L) % 512L;		 \
+         let ib = i % 512L;			 \
+         let c = i / (512L * 512L);					\
+         let index = i64(c)*(512L * 512L) + (i64(j) + jj)*512L + (ib + ii); \
+        merge(b, i32(f32(lookup(x, index)) * lookup(w, jj*3L + ii))) \  
+      ) \
+    ))) \
+)))))";
+
+  struct args2 {
+    struct weld_vector<int32_t> vector;
+    struct weld_vector<float> weights;
+  };
+
+  weld_error_t e = weld_error_new();
+    weld_conf_t conf = weld_conf_new();
+    weld_module_t m = weld_module_compile(program, conf, e);
+    weld_conf_free(conf);
+
+    if (weld_error_code(e)) {
+        const char *err = weld_error_message(e);
+        printf("Error message: %s\n", err);
+        exit(1);
+    }
+
+    weld_vector<int32_t> v;
+    const uint64_t length = H * W * C;
+    int32_t *data = d;
+
+    v.data = data;
+    v.length = length;
+
+    weld_vector<float> weights;
+    float w[] = {1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9};
+    weights.data = (float *)&w;
+    weights.length = 9L;
+    struct args2 a;
+    a.vector = v;
+    a.weights = weights;
+
+    weld_value_t arg = weld_value_new(&a);
+
+    // Run the module and get the result.
+    conf = weld_conf_new();
+    weld_value_t result = weld_module_run(m, conf, arg, e);
+    if (weld_error_code(e)) {
+        const char *err = weld_error_message(e);
+        printf("Error message: %s\n", err);
+        exit(1);
+    }
+    weld_vector<int32_t> *result_data = (weld_vector<int32_t> *) weld_value_data(result);
+    printf("Answer: %llu\n", result_data->length);
+    printf("Expect: %llu\n", length);
+
+    //    free(data);
+
+    // Free the values.
+    //weld_value_free(result);
+    weld_value_free(arg);
+    weld_conf_free(conf);
+
+    weld_error_free(e);
+    weld_module_free(m);
+
+    
+    return result_data->data;
+}
+
+int32_t* bilinear_demosaic(int32_t* d, int H, int W, int C) {
+  const char *program = "|x:vec[i32],w1:vec[f32],w2:vec[f32]| \
+result(for(rangeiter(0L, 3L*512L*512L, 1L),					 \
+appender[i32],					 \
+|b, i, e|					 \
+merge(b, result(				 \
+  for(						 \
+    rangeiter(0L, 3L, 1L),			 \
+    merger[i32, +],				 \
+    |b, ii, e|					 \
+    merge(b, result(				 \
+      for(					 \
+        rangeiter(0L, 3L, 1L),			 \
+        merger[i32, +],				 \
+        |b, jj, e|				 \
+        merge(b, 255) \  
+      ) \
+    ))) \
+)))))";
+
+  struct args2 {
+    struct weld_vector<int32_t> vector;
+    struct weld_vector<float> weights;
+  };
+
+  weld_error_t e = weld_error_new();
+    weld_conf_t conf = weld_conf_new();
+    weld_module_t m = weld_module_compile(program, conf, e);
+    weld_conf_free(conf);
+
+    if (weld_error_code(e)) {
+        const char *err = weld_error_message(e);
+        printf("Error message: %s\n", err);
+        exit(1);
+    }
+
+    weld_vector<int32_t> v;
+    const uint64_t length = H * W * C;
+    int32_t *data = d;
+
+    v.data = data;
+    v.length = length;
+
+    weld_vector<float> weights;
+    float w[] = {1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9};
+    weights.data = (float *)&w;
+    weights.length = 9L;
+    struct args2 a;
+    a.vector = v;
+    a.weights = weights;
+
+    weld_value_t arg = weld_value_new(&a);
+
+    // Run the module and get the result.
+    conf = weld_conf_new();
+    weld_value_t result = weld_module_run(m, conf, arg, e);
+    if (weld_error_code(e)) {
+        const char *err = weld_error_message(e);
+        printf("Error message: %s\n", err);
+        exit(1);
+    }
+    weld_vector<int32_t> *result_data = (weld_vector<int32_t> *) weld_value_data(result);
+    printf("Answer: %llu\n", result_data->length);
+    printf("Expect: %llu\n", length);
+
+    //    free(data);
+
+    // Free the values.
+    //weld_value_free(result);
+    weld_value_free(arg);
+    weld_conf_free(conf);
+
+    weld_error_free(e);
+    weld_module_free(m);
+
+    
+    return result_data->data;
+}
+
+void read_png_file(char* file_name)
+{
+        char header[8];    // 8 is the maximum size that can be checked
+
+        /* open file and test for it being a png */
+        FILE *fp = fopen(file_name, "rb");
+        if (!fp)
+                abort_("[read_png_file] File %s could not be opened for reading", file_name);
+        fread(header, 1, 8, fp);
+        // if (png_sig_cmp(header, 0, 8))
+        //         abort_("[read_png_file] File %s is not recognized as a PNG file", file_name);
+
+
+        /* initialize stuff */
+        png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+
+        if (!png_ptr)
+                abort_("[read_png_file] png_create_read_struct failed");
+
+        info_ptr = png_create_info_struct(png_ptr);
+        if (!info_ptr)
+                abort_("[read_png_file] png_create_info_struct failed");
+
+        if (setjmp(png_jmpbuf(png_ptr)))
+                abort_("[read_png_file] Error during init_io");
+
+        png_init_io(png_ptr, fp);
+        png_set_sig_bytes(png_ptr, 8);
+
+        png_read_info(png_ptr, info_ptr);
+
+        width = png_get_image_width(png_ptr, info_ptr);
+        height = png_get_image_height(png_ptr, info_ptr);
+        color_type = png_get_color_type(png_ptr, info_ptr);
+        bit_depth = png_get_bit_depth(png_ptr, info_ptr);
+
+        number_of_passes = png_set_interlace_handling(png_ptr);
+        png_read_update_info(png_ptr, info_ptr);
+
+
+        /* read file */
+        if (setjmp(png_jmpbuf(png_ptr)))
+                abort_("[read_png_file] Error during read_image");
+
+        row_pointers = (png_bytep*) malloc(sizeof(png_bytep) * height);
+        for (y=0; y<height; y++)
+                row_pointers[y] = (png_byte*) malloc(png_get_rowbytes(png_ptr,info_ptr));
+
+        png_read_image(png_ptr, row_pointers);
+
+        fclose(fp);
+}
+
+
+void write_png_file(char* file_name)
+{
+        /* create file */
+        FILE *fp = fopen(file_name, "wb");
+        if (!fp)
+                abort_("[write_png_file] File %s could not be opened for writing", file_name);
+
+
+        /* initialize stuff */
+        png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+
+        if (!png_ptr)
+                abort_("[write_png_file] png_create_write_struct failed");
+
+        info_ptr = png_create_info_struct(png_ptr);
+        if (!info_ptr)
+                abort_("[write_png_file] png_create_info_struct failed");
+
+        if (setjmp(png_jmpbuf(png_ptr)))
+                abort_("[write_png_file] Error during init_io");
+
+        png_init_io(png_ptr, fp);
+
+
+        /* write header */
+        if (setjmp(png_jmpbuf(png_ptr)))
+                abort_("[write_png_file] Error during writing header");
+
+        png_set_IHDR(png_ptr, info_ptr, width, height,
+                     bit_depth, color_type, PNG_INTERLACE_NONE,
+                     PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+
+        png_write_info(png_ptr, info_ptr);
+
+	
+        /* write bytes */
+        if (setjmp(png_jmpbuf(png_ptr)))
+                abort_("[write_png_file] Error during writing bytes");	
+	
+        png_write_image(png_ptr, row_pointers);
+	
+	
+        /* end write */
+        if (setjmp(png_jmpbuf(png_ptr)))
+                abort_("[write_png_file] Error during end of write");
+
+        png_write_end(png_ptr, NULL);
+
+        /* cleanup heap allocation */
+        for (y=0; y<height; y++)
+                free(row_pointers[y]);
+        free(row_pointers);
+
+        fclose(fp);
+}
+
+
+void process_file(void)
+{
+        // if (png_get_color_type(png_ptr, info_ptr) == PNG_COLOR_TYPE_RGB)
+        //         abort_("[process_file] input file is PNG_COLOR_TYPE_RGB but must be PNG_COLOR_TYPE_RGBA "
+        //                "(lacks the alpha channel)");
+
+        // if (png_get_color_type(png_ptr, info_ptr) != PNG_COLOR_TYPE_RGBA)
+        //         abort_("[process_file] color_type of input file must be PNG_COLOR_TYPE_RGBA (%d) (is %d)",
+        //                PNG_COLOR_TYPE_RGBA, png_get_color_type(png_ptr, info_ptr));
+
+        for (y=0; y<height; y++) {
+                png_byte* row = row_pointers[y];
+                for (x=0; x<width; x++) {
+                        png_byte* ptr = &(row[x*3]);
+                        //printf("Pixel at position [ %d - %d ] has RGBA values: %d - %d - %d\n",
+                        //       x, y, ptr[0], ptr[1], ptr[2]);
+
+                        /* set red value to 0 and green value to the blue one */
+                        //ptr[0] = 0;
+                        //ptr[1] = ptr[2];
+                }
+        }
+
+
+}
+
+
+int main(int argc, char **argv)
+{
+        if (argc != 3)
+                abort_("Usage: program_name <file_in> <file_out>");
+
+	cv::Mat mat = imread(argv[1], cv::IMREAD_COLOR);
+	cv::Mat mat2 = imread(argv[1], cv::IMREAD_COLOR);
+	cv::Mat mat3 = imread("sample/color.exr", cv::IMREAD_COLOR); 
+	cv::Mat blur;
+	cv::Mat demosaic;
+	//cvtColor(mat3, demosaic, cv::COLOR_BayerBG2RGB);
+	printf("Num elements %lu\n", mat.total());
+	printf("Num rows %d\n", mat.rows);
+	printf("Num cols %d\n", mat.cols);
+	cv::Mat gray_image;
+	cvtColor(mat, gray_image, CV_BGR2GRAY);
+	GaussianBlur(mat2, blur, cv::Size(3, 3), 0, 0);
+	int height = mat.rows;
+	int width = mat.cols;
+	
+	int C = 3;
+	int32_t *data = (int32_t *) malloc(height * width * sizeof(int32_t) * 3);
+	printf("Writing data");
+	for(int c=0; c<C; c++){
+	  for (y=0; y<height; y++) {
+	    for (x=0; x<width; x++) {
+	      cv::Vec3b datav = mat.at<cv::Vec3b>(y, x);
+	      data[c*width*height + y*width + x] = datav[c];
+	      /* set red value to 0 and green value to the blue one */   
+	    }
+	  }
+	}
+	printf("Running program");
+
+	int32_t *reter = weld_prog(data, height, width, C);
+	for(int c = 0; c < C; c++){
+	  for(y=0; y < height; y++){
+	    for(x = 0; x < width; x++){
+	      // printf("%d %d at (%d, %d, %d)\n",
+	      // 	     data[c*width*height + y*width + x],
+	      // 	     reter[c*width*height + y*width + x], c, y, x);
+	      cv::Vec3b datav = mat.at<cv::Vec3b>(y, x);
+	      datav[c] = reter[c*width*height + y*width + x];
+	      mat.at<cv::Vec3b>(y, x) = datav;
+	    }
+	  }
+	}
+
+	cv::Mat gray = cv::Mat::zeros(512, 512, CV_32F);
+	int32_t *reter2 = weld_prog1(data, height, width, C);
+	for(int c = 0; c < C - 2; c++){
+	  for(y=0; y < height; y++){
+	    for(x = 0; x < width; x++){
+	      // printf("%d %d at (%d, %d, %d)\n",
+	      // 	     data[c*width*height + y*width + x],
+	      // 	     reter[c*width*height + y*width + x], c, y, x);
+	      //cv::Vec3b datav = mat.at<cv::Vec3b>(y, x);
+	      //datav[c] = reter[c*width*height + y*width + x];
+	      //mat.at<cv::Vec3b>(y, x) = datav;
+	      gray.at<float>(y, x) = reter2[c*width*height + y*width + x];
+	    }
+	  }
+	}
+
+
+	
+	//cv::waitKey(0);
+	//        read_png_file(argv[1]);
+        //process_file();
+        //write_png_file(argv[2]);
+	imwrite("blurred_Image.jpg", mat);
+	imwrite("cv_blurred.jpg", blur);
+	imwrite("Gray_Image.jpg", gray);
+	imwrite("Gray_Image2.jpg", gray_image);
+	//imwrite("cv_bayer.jpg", demosaic);
+        return 0;
+}
